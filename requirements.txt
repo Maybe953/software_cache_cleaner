@@ -1,0 +1,7 @@
+rich
+send2trash
+customtkinter
+pillow
+pywin32
+pyinstaller
+pywin32
