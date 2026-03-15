@@ -1,6 +1,7 @@
 import os
 import sys
 import argparse
+import datetime
 from rich.console import Console
 from rich.table import Table
 from rich.panel import Panel
@@ -22,7 +23,7 @@ else:
         sys.path.insert(0, current_dir)
 
 from cleaner import CacheCleaner
-from utils import format_size
+from utils import format_size, get_global_config_path, is_admin, check_autostart, set_autostart
 
 console = Console()
 
@@ -36,6 +37,11 @@ def main():
     
     args = parser.parse_args()
 
+    # [自动部署逻辑]：如果以管理员权限运行且尚未注册自启动任务
+    # 则执行“一次性静默安装”，确保之后所有用户登录都能触发清理
+    if is_admin() and not check_autostart():
+        set_autostart(True)
+
     # 如果没有任何参数，或者带了 --auto-clean 参数（由计划任务调用），我们启动 GUI
     if len(sys.argv) == 1 or args.auto_clean:
         try:
@@ -47,13 +53,9 @@ def main():
         app.mainloop()
         return
 
-    # Determine application path for config
-    if getattr(sys, 'frozen', False):
-        application_path = os.path.dirname(sys.executable)
-    else:
-        application_path = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    
-    config_path = os.path.join(application_path, "config.json")
+    # Determine global application path for config and logs
+    global_app_path = get_global_config_path()
+    config_path = os.path.join(global_app_path, "config.json")
     custom_paths, whitelist = [], []
     
     if os.path.exists(config_path):
@@ -128,6 +130,16 @@ def main():
                         console.print(f"- {err}")
                     if len(errors) > 5:
                         console.print(f"... 以及另外 {len(errors) - 5} 个错误。")
+                    
+                    # Log errors to global file for headless execution review
+                    try:
+                        log_path = os.path.join(global_app_path, "cleaner_errors.log")
+                        with open(log_path, "a", encoding="utf-8") as lf:
+                            lf.write(f"\n--- [Auto Clean Errors {datetime.datetime.now()}] ---\n")
+                            for err in errors:
+                                lf.write(f"{err}\n")
+                    except Exception:
+                        pass
 
 if __name__ == "__main__":
     main()

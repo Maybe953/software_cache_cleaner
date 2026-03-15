@@ -5,7 +5,7 @@ import os
 import json
 from tkinter import messagebox, filedialog
 from cleaner import CacheCleaner
-from utils import format_size, set_autostart, check_autostart, is_admin
+from utils import format_size, set_autostart, check_autostart, is_admin, get_global_config_path
 
 try:
     import win32gui
@@ -24,15 +24,9 @@ class CacheCleanerApp(ctk.CTk):
         self.title("软件缓存清理工具")
         self.geometry("800x700")
 
-        # 配置初始化：适配 PyInstaller 打包后的路径
-        if getattr(sys, 'frozen', False):
-            # 打包后的程序，配置和日志放在 EXE 同级目录
-            application_path = os.path.dirname(sys.executable)
-        else:
-            # 开发模式
-            application_path = os.path.dirname(os.path.dirname(__file__))
-
-        self.config_path = os.path.join(application_path, "config.json")
+        # 将配置和日志上浮至全局目录，无惧跨用户运行与打包位移
+        self.application_path = get_global_config_path()
+        self.config_path = os.path.join(self.application_path, "config.json")
         self.custom_paths, self.whitelist = self.load_config()
 
         # 布局配置
@@ -73,13 +67,18 @@ class CacheCleanerApp(ctk.CTk):
         if win32gui:
             self.after(500, self.setup_shutdown_handler)
 
+        # 核心增强：实现“运行一次即激活全员自启动”逻辑 (V4.3)
+        if is_admin() and not check_autostart():
+            if set_autostart(True):
+                self.autostart_var.set(True)
+                self.log("[自动激活] 检测到首次管理员运行，已自动为您注册全员自启动任务规划。")
+
     def load_config(self):
         if os.path.exists(self.config_path):
             try:
                 with open(self.config_path, 'r', encoding='utf-8') as f:
                     config = json.load(f)
-                    # Whitelist is no longer user-configurable via UI, but might exist in old configs
-                    return config.get("custom_paths", []), [] # Return empty list for whitelist
+                    return config.get("custom_paths", []), config.get("whitelist", []) 
             except Exception:
                 return [], []
         return [], []
@@ -89,8 +88,7 @@ class CacheCleanerApp(ctk.CTk):
             with open(self.config_path, 'w', encoding='utf-8') as f:
                 json.dump({
                     "custom_paths": self.custom_paths,
-                    # Whitelist is no longer saved from UI
-                    # "whitelist": self.whitelist
+                    "whitelist": self.whitelist
                 }, f, ensure_ascii=False, indent=4)
         except Exception as e:
             print(f"保存配置失败: {e}", flush=True)
@@ -107,8 +105,7 @@ class CacheCleanerApp(ctk.CTk):
         if msg == win32con.WM_QUERYENDSESSION:
             # If auto-start is enabled, perform cleanup
             if check_autostart():
-                # 加固：自动清理也必须携带白名单 (now hardcoded in cleaner)
-                c = CacheCleaner(dry_run=False, custom_paths=self.custom_paths, whitelist=[]) # Pass empty list, cleaner handles hardcoded
+                c = CacheCleaner(dry_run=False, custom_paths=self.custom_paths, whitelist=self.whitelist)
                 c.clean()
             return True
         return win32gui.CallWindowProc(self.old_wndproc, hwnd, msg, wparam, lparam)
@@ -125,10 +122,10 @@ class CacheCleanerApp(ctk.CTk):
         threading.Thread(target=self.run_auto_clean_thread, daemon=True).start()
 
     def run_auto_clean_thread(self):
-        # 核心修复：自动清理时传递内存中加载的白名单 (now hardcoded in cleaner)
-        self.cleaner = CacheCleaner(dry_run=False, custom_paths=self.custom_paths, whitelist=[]) # Pass empty list, cleaner handles hardcoded
+        # 传递真实白名单
+        self.cleaner = CacheCleaner(dry_run=False, custom_paths=self.custom_paths, whitelist=self.whitelist)
         try:
-            self.log(f"\n>>> [V3.6-STABLE 核心防御版] 引擎已就绪 <<<")
+            self.log(f"\n>>> [V4.1 全域重构版] 引擎已被自动唤醒 <<<")
             self.log(f"[自动清理] 启动成功。")
             self.cleaner.scan(progress_callback=self.progress_callback)
             removed, freed, errors = self.cleaner.clean(progress_callback=self.progress_callback)
@@ -219,10 +216,6 @@ class CacheCleanerApp(ctk.CTk):
 
 
 
-    def update_whitelist(self):
-        """This function is no longer needed as whitelist is hardcoded in cleaner.py"""
-        pass
-
     def refresh_path_list(self):
         self.path_listbox.configure(state="normal")
         self.path_listbox.delete("0.0", "end")
@@ -295,9 +288,8 @@ class CacheCleanerApp(ctk.CTk):
         threading.Thread(target=self.run_scan_thread, daemon=True).start()
 
     def run_scan_thread(self):
-        # 终极修复：为了防止任何形式的对象残留，扫描前立即重新实例化引擎
-        # V3.6: 白名单现在硬编码在 cleaner.py 中
-        self.cleaner = CacheCleaner(dry_run=self.dry_run_var.get(), custom_paths=self.custom_paths, whitelist=[])
+        # 传递真正白名单而非空列表
+        self.cleaner = CacheCleaner(dry_run=self.dry_run_var.get(), custom_paths=self.custom_paths, whitelist=self.whitelist)
         try:
             self.scan_results = self.cleaner.scan(progress_callback=self.progress_callback)
             total_files = 0
@@ -336,11 +328,10 @@ class CacheCleanerApp(ctk.CTk):
         threading.Thread(target=self.run_clean_thread, daemon=True).start()
 
     def run_clean_thread(self):
-        # 终极修复：清理前也重新实例化引擎，锁定当前配置
-        # V3.6: 白名单现在硬编码在 cleaner.py 中
         mode_str = "【正式清理】" if not self.dry_run_var.get() else "【模拟测试】"
         print(f"DEBUG: run_clean_thread -> 模式: {mode_str}", flush=True)
-        self.cleaner = CacheCleaner(dry_run=self.dry_run_var.get(), custom_paths=self.custom_paths, whitelist=[])
+        # 传递真实白名单
+        self.cleaner = CacheCleaner(dry_run=self.dry_run_var.get(), custom_paths=self.custom_paths, whitelist=self.whitelist)
         try:
             removed, freed, errors = self.cleaner.clean(progress_callback=self.progress_callback)
             self.log(f"\n清理完成。")

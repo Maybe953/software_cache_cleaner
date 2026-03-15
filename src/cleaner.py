@@ -1,5 +1,4 @@
 import os
-import shutil
 import winreg
 from pathlib import Path
 from typing import List, Tuple, Dict
@@ -9,15 +8,21 @@ class CacheCleaner:
     def __init__(self, dry_run: bool = True, custom_paths: List[str] = None, whitelist: List[str] = None):
         self.dry_run = dry_run
         
-        # 核心保护名单 (V3.8)：账号文件夹绝对过滤
-        self.protected_names = {'a', 'b'}
+        # 恢复由外界（如 config.json）决定的白名单，并叠加硬编码强制保护的底座
+        self.protected_names = {'a', 'b'} # 硬编码基础白名单占位符，可修改为实际名称
         if whitelist:
             for w in whitelist:
                 if w.strip():
-                    # [Old Case-Insensitive]
-                    # self.protected_names.add(w.strip().lower())
-                    # [New Strict Case]
                     self.protected_names.add(w.strip())
+
+        # 硬编码要清理的文件后缀名清单 (V4.2 精准清理版)
+        self.target_extensions = {
+            ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp",
+            ".mp4", ".mov", ".avi", ".flv", ".wmv",
+            ".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx",
+            ".zip", ".rar", ".7z", ".tar", ".gz",
+            ".tmp", ".cache"
+        }
 
         # 系统忽略名单 (V3.9)：针对受限的系统项进行静默跳过
         self.system_ignores = {
@@ -115,6 +120,7 @@ class CacheCleaner:
         # 路径去重并标准化
         
         clean_targets = []
+        seen = set()
         for t in self.targets:
             norm_p = str(t.absolute()).lower()
             if norm_p not in seen:
@@ -168,20 +174,16 @@ class CacheCleaner:
                                 progress_callback(f"    [{notify_type}] 排除项: {d}")
                             dirnames.remove(d)
                     
-                    # 确定当前文件是否在微信环境下
-                    is_in_wx = self.is_wx_work(target)
+                    # 遍历目录及文件清单
                     
                     for file in filenames:
                         try:
                             f_path = Path(root) / file
                             
-                            # 如果在微信目录下，只统计 Cache 文件夹内的文件
-                            if is_in_wx:
-                                if "Cache" not in f_path.parts:
-                                    continue
-                                    
-                            size += f_path.stat().st_size
-                            count += 1
+                            # 判定是否在过滤后缀清单中
+                            if f_path.suffix.lower() in self.target_extensions:
+                                size += f_path.stat().st_size
+                                count += 1
                         except (PermissionError, OSError):
                             continue
             except (PermissionError, OSError):
@@ -211,16 +213,16 @@ class CacheCleaner:
                 progress_callback(0, 0, f"正在清理 {target}...")
 
             # 递归删除逻辑，内部会再次检查保护名单
-            removed, freed, errs = self._recursive_delete(target, is_root=True, is_wx_context=self.is_wx_work(target))
+            removed, freed, errs = self._recursive_delete(target)
             files_removed += removed
             bytes_freed += freed
             errors.extend(errs)
         
         return files_removed, bytes_freed, errors
 
-    def _recursive_delete(self, path: Path, is_root: bool = False, is_wx_context: bool = False) -> Tuple[int, int, List[str]]:
+    def _recursive_delete(self, path: Path) -> Tuple[int, int, List[str]]:
         """
-        递归删除路径下的所有文件和子目录。
+        地毯式递归深度清理：根据后缀清单删除文件，保留文件夹结构。
         """
         removed, freed = 0, 0
         errors = []
@@ -229,63 +231,41 @@ class CacheCleaner:
             return 0, 0, []
 
         try:
-            # 文件/符号链接处理
-            if path.is_file() or path.is_symlink():
-                # 微信策略：非 Cache 目录内的文件严禁触碰
-                if is_wx_context and "Cache" not in path.parts:
-                    return 0, 0, []
-                
-                size = path.stat().st_size
-                if not self.dry_run:
-                    path.unlink()
-                return 1, size, []
-
-            # 目录处理
+            # os.scandir 比 Path.glob 更快更稳定
             for entry in os.scandir(path):
                 entry_path = Path(entry.path)
-                # [Old] entry_name_lower = entry_path.name.lower()
                 
                 # 综合过滤：只要名字匹配名单，绝对不动
-                # [Old Case-Insensitive] if entry_name_lower in self.protected_names or entry_name_lower in self.system_ignores:
                 if entry_path.name in self.protected_names or entry_path.name.lower() in self.system_ignores:
                     continue
 
                 try:
                     if entry.is_file() or entry.is_symlink():
-                        if is_wx_context and "Cache" not in entry_path.parts:
-                            continue
-                            
-                        size = entry.stat().st_size
-                        if not self.dry_run:
-                            try:
-                                entry_path.unlink()
+                        # 精准后缀匹配：只删除命中后缀的文件
+                        if entry_path.suffix.lower() in self.target_extensions:
+                            size = entry.stat().st_size
+                            if not self.dry_run:
+                                try:
+                                    entry_path.unlink()
+                                    removed += 1
+                                    freed += size
+                                except (PermissionError, OSError):
+                                    pass
+                            else:
                                 removed += 1
                                 freed += size
-                            except (PermissionError, OSError):
-                                pass
-                        else:
-                            removed += 1
-                            freed += size
                             
                     elif entry.is_dir():
-                        r, f, e = self._recursive_delete(entry_path, is_root=False, is_wx_context=is_wx_context)
+                        # 继续向下穿透扫描全量目录
+                        r, f, e = self._recursive_delete(entry_path)
                         removed += r
                         freed += f
                         errors.extend(e)
                 except Exception as e:
                     errors.append(f"访问项出错 {entry.name}: {e}")
 
-            # 目录收尾
-            if not is_root and not self.dry_run:
-                try:
-                    # 微信策略：只有路径中包含 "Cache" 的目录才允许被清理
-                    # 这确保了非 Cache 文件夹（如 File, Video, EmptyNotes）及其父目录结构被完整保留
-                    if is_wx_context and "Cache" not in path.parts:
-                        pass
-                    else:
-                        path.rmdir()
-                except (PermissionError, OSError):
-                    pass
+            # 目录收尾：不再删除任何文件夹，保留目录结构便于软件运行
+            pass
 
         except Exception as e:
             errors.append(f"处理目录 {path} 出错: {e}")
