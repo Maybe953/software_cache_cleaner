@@ -35,7 +35,7 @@ echo    - 依赖: 自动收集 customtkinter
 echo    - 图标: assets/icon.ico
 echo.
 
-.\venv\Scripts\pyinstaller --noconsole --onefile --clean --uac-admin --name "SoftwareCacheCleaner" --icon="assets/icon.ico" --collect-all customtkinter src/main.py
+.\.venv\Scripts\pyinstaller --noconsole --onefile --clean --uac-admin --name "SoftwareCacheCleaner" --icon="assets/icon.ico" --collect-all customtkinter src/main.py
 
 if %errorlevel% neq 0 (
     echo.

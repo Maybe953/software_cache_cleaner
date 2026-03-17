@@ -37,10 +37,9 @@ def main():
     
     args = parser.parse_args()
 
-    # [自动部署逻辑]：如果以管理员权限运行且尚未注册自启动任务
-    # 则执行“一次性静默安装”，确保之后所有用户登录都能触发清理
-    if is_admin() and not check_autostart():
-        set_autostart(True)
+    # [自动部署逻辑已禁用]：不再开机即导出自启动，改为完全由用户手动在设置中开启
+    # if is_admin() and not check_autostart():
+    #     set_autostart(True)
 
     # 如果没有任何参数，或者带了 --auto-clean 参数（由计划任务调用），我们启动 GUI
     if len(sys.argv) == 1 or args.auto_clean:

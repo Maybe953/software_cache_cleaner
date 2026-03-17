@@ -1,5 +1,7 @@
 import os
 import winreg
+import ctypes
+import string
 from pathlib import Path
 from typing import List, Tuple, Dict
 from utils import format_size, get_system_temp_dir
@@ -31,7 +33,7 @@ class CacheCleaner:
             'network_service'
         }
         
-        print(f"\n>>> [V4.0 全域清理版] 引擎已就绪 <<<", flush=True)
+        print(f"\n>>> [V4.4 强力自愈版] 引擎已就绪 <<<", flush=True)
         print(f">>> 账号保护名单: {list(self.protected_names)}\n", flush=True)
         
         self.targets = []
@@ -116,6 +118,21 @@ class CacheCleaner:
                 wx_default = Path(os.path.expanduser("~/Documents/WXWorkLocal"))
                 if wx_default.exists():
                     self.targets.append(wx_default)
+
+        # 6. 全盘回收站扫描 (V4.4 强力补丁)
+        try:
+            bitmask = ctypes.windll.kernel32.GetLogicalDrives()
+            for letter in string.ascii_uppercase:
+                if bitmask & 1:
+                    drive_path = f"{letter}:\\"
+                    # 仅扫描固定驱动器 (DRIVE_FIXED = 3)
+                    if ctypes.windll.kernel32.GetDriveTypeW(drive_path) == 3:
+                        rb_path = Path(drive_path) / "$Recycle.Bin"
+                        if rb_path.exists():
+                            self.targets.append(rb_path)
+                bitmask >>= 1
+        except Exception:
+            pass
         
         # 路径去重并标准化
         
@@ -198,6 +215,17 @@ class CacheCleaner:
         bytes_freed = 0
         errors = []
 
+        # 1. 调用系统 API 清理全盘回收站 (V4.1+)
+        if not self.dry_run:
+            if progress_callback:
+                progress_callback(0, 0, "正在清空系统回收站 (所有驱动器)...")
+            res = self._empty_recycle_bin()
+            if progress_callback:
+                if res == 0:
+                    progress_callback(0, 0, "  [成功] 系统回收站已清空。")
+                else:
+                    progress_callback(0, 0, f"  [警告] 回收站 API 返回异常码: {hex(res & 0xFFFFFFFF)}")
+
         for target in self.targets:
             if not target.exists():
                 continue
@@ -241,8 +269,10 @@ class CacheCleaner:
 
                 try:
                     if entry.is_file() or entry.is_symlink():
-                        # 精准后缀匹配：只删除命中后缀的文件
-                        if entry_path.suffix.lower() in self.target_extensions:
+                        # 回收站“全量轰炸”逻辑：针对回收站路径忽略后缀匹配 (V4.4)
+                        is_in_recycle = "$Recycle.Bin" in entry_path.parts
+                        
+                        if is_in_recycle or entry_path.suffix.lower() in self.target_extensions:
                             size = entry.stat().st_size
                             if not self.dry_run:
                                 try:
@@ -271,3 +301,23 @@ class CacheCleaner:
             errors.append(f"处理目录 {path} 出错: {e}")
 
         return removed, freed, errors
+
+    def _empty_recycle_bin(self):
+        """
+        调用 Windows Shell API 清空所有驱动器的回收站。
+        """
+        try:
+            # 定义 API 参数类型以提高稳定性
+            shell32 = ctypes.windll.shell32
+            # 1: SHERB_NOCONFIRMATION, 2: SHERB_NOPROGRESSUI, 4: SHERB_NOSOUND
+            flags = 1 | 2 | 4
+            
+            # SHEmptyRecycleBinW(HWND hwnd, LPCWSTR pszRootPath, DWORD dwFlags)
+            shell32.SHEmptyRecycleBinW.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_uint32]
+            shell32.SHEmptyRecycleBinW.restype = ctypes.c_int32
+            
+            res = shell32.SHEmptyRecycleBinW(None, None, flags)
+            return res
+        except Exception as e:
+            print(f"DEBUG: Recycle Bin API Error: {e}")
+            return -1

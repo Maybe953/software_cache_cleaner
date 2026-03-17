@@ -89,6 +89,7 @@ def set_autostart(enabled: bool):
   <Triggers>
     <LogonTrigger>
       <Enabled>true</Enabled>
+      <Delay>PT0S</Delay>
       <!-- 此处不在 LogonTrigger 中指定 UserId，意味着针对 Any User -->
     </LogonTrigger>
   </Triggers>
@@ -115,7 +116,7 @@ def set_autostart(enabled: bool):
     <RunOnlyIfIdle>false</RunOnlyIfIdle>
     <WakeToRun>false</WakeToRun>
     <ExecutionTimeLimit>PT1H</ExecutionTimeLimit>
-    <Priority>7</Priority>
+    <Priority>1</Priority>
   </Settings>
   <Actions Context="Author">
     <Exec>
@@ -150,8 +151,17 @@ def set_autostart(enabled: bool):
         else:
             # 移除计划任务
             command = f'schtasks /delete /tn "{task_name}" /f'
-            subprocess.run(command, capture_output=True, text=True, shell=True)
-            return True
+            result = subprocess.run(command, capture_output=True, text=True, shell=True)
+            
+            # 检查结果：如果删除成功，或者任务已经不存在（也算成功）
+            if result.returncode == 0 or not check_autostart():
+                return True
+            else:
+                with open(global_log_file, "a", encoding="utf-8") as lf:
+                    lf.write(f"\n--- [Autostart Delete Error {datetime.datetime.now()}] ---\n")
+                    lf.write(f"Command: {command}\n")
+                    lf.write(f"Stderr: {result.stderr}\n")
+                return False
     except Exception as e:
         print(f"DEBUG: 设置计划任务自启动出错: {e}", flush=True)
         return False
