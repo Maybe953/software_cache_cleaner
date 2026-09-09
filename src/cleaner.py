@@ -26,6 +26,9 @@ class CacheCleaner:
             ".tmp", ".cache"
         }
 
+        # 企业微信特有需全量清理的子文件夹名称清单 (自动转小写保证兼容)
+        self.wx_target_folders = {f.lower() for f in {'File', 'Image', 'Voice'}}
+
         # 系统忽略名单 (V3.9)：针对受限的系统项进行静默跳过
         self.system_ignores = {
             'vmware-system', 'vmware-vpx', 'cryptnetdownloadcache', 
@@ -149,6 +152,22 @@ class CacheCleaner:
         """判定是否为企业微信路径 (不区分大小写)"""
         return "wxworklocal" in str(path).lower()
 
+    def _count_folder_all(self, folder_path: Path) -> Tuple[int, int]:
+        """全量递归统计某个文件夹内所有文件的数量和总体积（不限制后缀）"""
+        count, size = 0, 0
+        try:
+            for root, _, filenames in os.walk(folder_path):
+                for file in filenames:
+                    try:
+                        f_path = Path(root) / file
+                        size += f_path.stat().st_size
+                        count += 1
+                    except (PermissionError, OSError):
+                        continue
+        except (PermissionError, OSError):
+            pass
+        return count, size
+
     def scan(self, progress_callback=None) -> Dict[str, Tuple[int, int]]:
         results = {}
         for target in self.targets:
@@ -167,6 +186,7 @@ class CacheCleaner:
 
             count = 0
             size = 0
+            is_wx = self.is_wx_work(target)
             
             # 系统扫描逻辑
             try:
@@ -190,6 +210,13 @@ class CacheCleaner:
                                 notify_type = "绝对隔离" if d in self.protected_names else "系统保护"
                                 progress_callback(f"    [{notify_type}] 排除项: {d}")
                             dirnames.remove(d)
+                        elif is_wx and d_lower in self.wx_target_folders:
+                            # 如果是企业微信路径且属于 File/Image/Voice 目标文件夹，进行全量统计
+                            wx_folder_path = Path(root) / d
+                            f_count, f_size = self._count_folder_all(wx_folder_path)
+                            count += f_count
+                            size += f_size
+                            dirnames.remove(d)  # 避免 os.walk 重复深入
                     
                     # 遍历目录及文件清单
                     
@@ -241,14 +268,63 @@ class CacheCleaner:
                 progress_callback(0, 0, f"正在清理 {target}...")
 
             # 递归删除逻辑，内部会再次检查保护名单
-            removed, freed, errs = self._recursive_delete(target)
+            is_wx = self.is_wx_work(target)
+            removed, freed, errs = self._recursive_delete(target, is_wx_context=is_wx)
             files_removed += removed
             bytes_freed += freed
             errors.extend(errs)
         
         return files_removed, bytes_freed, errors
 
-    def _recursive_delete(self, path: Path) -> Tuple[int, int, List[str]]:
+    def _delete_folder_all(self, folder_path: Path) -> Tuple[int, int, List[str]]:
+        """全量递归删除某个文件夹内的所有内容（不限制后缀），并在非 dry_run 下删除空文件夹"""
+        removed, freed = 0, 0
+        errors = []
+
+        if not folder_path.exists():
+            return 0, 0, []
+
+        try:
+            for entry in os.scandir(folder_path):
+                entry_path = Path(entry.path)
+                try:
+                    if entry.is_dir():
+                        r, f, e = self._delete_folder_all(entry_path)
+                        removed += r
+                        freed += f
+                        errors.extend(e)
+                        if not self.dry_run:
+                            try:
+                                entry_path.rmdir()
+                            except OSError:
+                                pass
+                    elif entry.is_file() or entry.is_symlink():
+                        size = entry.stat().st_size
+                        if not self.dry_run:
+                            try:
+                                entry_path.unlink()
+                                removed += 1
+                                freed += size
+                            except (PermissionError, OSError):
+                                pass
+                        else:
+                            removed += 1
+                            freed += size
+                except Exception as e:
+                    errors.append(f"清理文件夹子项出错 {entry.name}: {e}")
+
+            if not self.dry_run:
+                try:
+                    folder_path.rmdir()
+                except OSError:
+                    pass
+
+        except Exception as e:
+            errors.append(f"处理文件夹 {folder_path} 出错: {e}")
+
+        return removed, freed, errors
+
+    def _recursive_delete(self, path: Path, is_wx_context: bool = False) -> Tuple[int, int, List[str]]:
         """
         地毯式递归深度清理：根据后缀清单删除文件，保留文件夹结构。
         """
@@ -286,11 +362,18 @@ class CacheCleaner:
                                 freed += size
                             
                     elif entry.is_dir():
-                        # 继续向下穿透扫描全量目录
-                        r, f, e = self._recursive_delete(entry_path)
-                        removed += r
-                        freed += f
-                        errors.extend(e)
+                        # 如果是企业微信专属目标文件夹（File/Image/Voice），全量删除该文件夹下所有内容
+                        if is_wx_context and entry_path.name.lower() in self.wx_target_folders:
+                            r, f, e = self._delete_folder_all(entry_path)
+                            removed += r
+                            freed += f
+                            errors.extend(e)
+                        else:
+                            # 继续向下穿透扫描全量目录
+                            r, f, e = self._recursive_delete(entry_path, is_wx_context=is_wx_context)
+                            removed += r
+                            freed += f
+                            errors.extend(e)
                 except Exception as e:
                     errors.append(f"访问项出错 {entry.name}: {e}")
 
