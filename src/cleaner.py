@@ -152,11 +152,19 @@ class CacheCleaner:
         """判定是否为企业微信路径 (不区分大小写)"""
         return "wxworklocal" in str(path).lower()
 
+    def is_full_clean_root(self, path: Path) -> bool:
+        """判定目标根目录是否属于 Pictures 或 Downloads (需要全量忽略后缀清理)"""
+        return path.name.lower() in {'pictures', 'downloads'}
+
     def _count_folder_all(self, folder_path: Path) -> Tuple[int, int]:
-        """全量递归统计某个文件夹内所有文件的数量和总体积（不限制后缀）"""
+        """全量递归统计某个文件夹内所有文件的数量和总体积（不限制后缀），尊重白名单隔离"""
         count, size = 0, 0
         try:
-            for root, _, filenames in os.walk(folder_path):
+            for root, dirnames, filenames in os.walk(folder_path):
+                original_dirs = list(dirnames)
+                for d in original_dirs:
+                    if d in self.protected_names or d.lower() in self.system_ignores:
+                        dirnames.remove(d)
                 for file in filenames:
                     try:
                         f_path = Path(root) / file
@@ -183,6 +191,12 @@ class CacheCleaner:
 
             if progress_callback:
                 progress_callback(f"正在扫描 {target}...")
+
+            # 针对 Pictures 和 Downloads 目录，直接全量统计（忽略后缀，遵从白名单）
+            if self.is_full_clean_root(target):
+                c, s = self._count_folder_all(target)
+                results[str(target)] = (c, s)
+                continue
 
             count = 0
             size = 0
@@ -267,6 +281,14 @@ class CacheCleaner:
             if progress_callback:
                 progress_callback(0, 0, f"正在清理 {target}...")
 
+            # 针对 Pictures 和 Downloads 根目标，全量清空内部项（不删除根文件夹本身）
+            if self.is_full_clean_root(target):
+                r, f, e = self._clean_full_root(target)
+                files_removed += r
+                bytes_freed += f
+                errors.extend(e)
+                continue
+
             # 递归删除逻辑，内部会再次检查保护名单
             is_wx = self.is_wx_work(target)
             removed, freed, errs = self._recursive_delete(target, is_wx_context=is_wx)
@@ -275,6 +297,53 @@ class CacheCleaner:
             errors.extend(errs)
         
         return files_removed, bytes_freed, errors
+
+    def _clean_full_root(self, target: Path) -> Tuple[int, int, List[str]]:
+        """全量清空根目标文件夹内部的所有子项（不删除根文件夹本身）"""
+        removed, freed = 0, 0
+        errors = []
+
+        if not target.exists():
+            return 0, 0, []
+
+        try:
+            for entry in os.scandir(target):
+                entry_path = Path(entry.path)
+                
+                # 综合过滤：只要名字匹配名单，绝对不动
+                if entry_path.name in self.protected_names or entry_path.name.lower() in self.system_ignores:
+                    continue
+
+                try:
+                    if entry.is_dir():
+                        r, f, e = self._delete_folder_all(entry_path)
+                        removed += r
+                        freed += f
+                        errors.extend(e)
+                        if not self.dry_run:
+                            try:
+                                entry_path.rmdir()
+                            except OSError:
+                                pass
+                    elif entry.is_file() or entry.is_symlink():
+                        size = entry.stat().st_size
+                        if not self.dry_run:
+                            try:
+                                entry_path.unlink()
+                                removed += 1
+                                freed += size
+                            except (PermissionError, OSError):
+                                pass
+                        else:
+                            removed += 1
+                            freed += size
+                except Exception as e:
+                    errors.append(f"访问项出错 {entry.name}: {e}")
+
+        except Exception as e:
+            errors.append(f"处理根目录 {target} 出错: {e}")
+
+        return removed, freed, errors
 
     def _delete_folder_all(self, folder_path: Path) -> Tuple[int, int, List[str]]:
         """全量递归删除某个文件夹内的所有内容（不限制后缀），并在非 dry_run 下删除空文件夹"""
