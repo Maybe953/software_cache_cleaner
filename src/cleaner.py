@@ -1,10 +1,19 @@
 import os
-import winreg
-import ctypes
+import sys
 import string
 from pathlib import Path
 from typing import List, Tuple, Dict
 from utils import format_size, get_system_temp_dir
+
+try:
+    import winreg
+except ImportError:
+    winreg = None
+
+try:
+    import ctypes
+except ImportError:
+    ctypes = None
 
 class CacheCleaner:
     def __init__(self, dry_run: bool = True, custom_paths: List[str] = None, whitelist: List[str] = None):
@@ -50,92 +59,99 @@ class CacheCleaner:
         # 2. 系统临时目录
         self.targets.append(Path(get_system_temp_dir()))
         
-        # 3. Windows 临时目录
-        win_temp = Path(os.environ.get('SystemRoot', 'C:\\Windows')) / 'Temp'
-        if win_temp.exists():
-            self.targets.append(win_temp)
-
-        # 4. 浏览器缓存 (Chrome / Edge)
-        # local_app_data = Path(os.environ.get('LOCALAPPDATA', ''))
-        # if local_app_data:
-        #     chrome_cache = local_app_data / 'Google' / 'Chrome' / 'User Data' / 'Default' / 'Cache'
-        #     if chrome_cache.exists():
-        #         self.targets.append(chrome_cache)
+        if sys.platform == 'win32':
+            # --- Windows 特有扫描路径 ---
             
-        #     edge_cache = local_app_data / 'Microsoft' / 'Edge' / 'User Data' / 'Default' / 'Cache'
-        #     if edge_cache.exists():
-        #         self.targets.append(edge_cache)
+            # 3. Windows 临时目录
+            win_temp = Path(os.environ.get('SystemRoot', 'C:\\Windows')) / 'Temp'
+            if win_temp.exists():
+                self.targets.append(win_temp)
 
-        # 5. 企业微信缓存 (WXWorkLocal - 跨用户扫描)
-        # 获取系统用户根目录 (确保是 C:\Users 而不是 C:Users)
-        sys_drive = os.environ.get('SystemDrive', 'C:')
-        if not sys_drive.endswith('\\'):
-            sys_drive += '\\'
-        users_root = Path(sys_drive) / "Users"
-        
-        if users_root.exists():
-            # 排除列表：系统默认账户、公共账户及隐藏文件
-            exclude_users = {'Public', 'Default', 'All Users', 'Default User', 'desktop.ini'}
+            # 4. 企业微信缓存 (WXWorkLocal - 跨用户扫描)
+            sys_drive = os.environ.get('SystemDrive', 'C:')
+            if not sys_drive.endswith('\\'):
+                sys_drive += '\\'
+            users_root = Path(sys_drive) / "Users"
             
+            if users_root.exists():
+                exclude_users = {'Public', 'Default', 'All Users', 'Default User', 'desktop.ini'}
+                try:
+                    for user_dir in os.scandir(users_root):
+                        if user_dir.is_dir() and user_dir.name not in exclude_users:
+                            user_base_path = Path(user_dir.path)
+                            
+                            # 企业微信路径
+                            user_wx_path = user_base_path / "Documents" / "WXWorkLocal"
+                            if user_wx_path.exists():
+                                self.targets.append(user_wx_path)
+                            
+                            # 用户临时目录
+                            user_temp_path = user_base_path / "AppData" / "Local" / "Temp"
+                            if user_temp_path.exists():
+                                self.targets.append(user_temp_path)
+                            
+                            # 用户图片目录
+                            user_pics_path = user_base_path / "Pictures"
+                            if user_pics_path.exists():
+                                self.targets.append(user_pics_path)
+
+                            # 下载目录
+                            user_dls_path = user_base_path / "Downloads"
+                            if user_dls_path.exists():
+                                self.targets.append(user_dls_path)
+                except Exception:
+                    pass
+
+            if not any(self.is_wx_work(t) for t in self.targets):
+                try:
+                    if winreg:
+                        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders") as key:
+                            personal_path, _ = winreg.QueryValueEx(key, "Personal")
+                            docs_path = Path(os.path.expandvars(personal_path))
+                            wx_work_path = docs_path / "WXWorkLocal"
+                            if wx_work_path.exists():
+                                self.targets.append(wx_work_path)
+                except Exception:
+                    wx_default = Path(os.path.expanduser("~/Documents/WXWorkLocal"))
+                    if wx_default.exists():
+                        self.targets.append(wx_default)
+
+            # 5. 全盘回收站扫描
             try:
-                for user_dir in os.scandir(users_root):
-                    if user_dir.is_dir() and user_dir.name not in exclude_users:
-                        user_base_path = Path(user_dir.path)
-                        
-                        # 1. 企业微信路径 (WXWorkLocal)
-                        user_wx_path = user_base_path / "Documents" / "WXWorkLocal"
-                        if user_wx_path.exists():
-                            self.targets.append(user_wx_path)
-                        
-                        # 2. 用户临时目录 (Temp)
-                        user_temp_path = user_base_path / "AppData" / "Local" / "Temp"
-                        if user_temp_path.exists():
-                            self.targets.append(user_temp_path)
-                        
-                        # 3. 用户图片目录 (Pictures)
-                        user_pics_path = user_base_path / "Pictures"
-                        if user_pics_path.exists():
-                            self.targets.append(user_pics_path)
-
-                        # 4. 浏览器默认下载目录 (Downloads)
-                        user_dls_path = user_base_path / "Downloads"
-                        if user_dls_path.exists():
-                            self.targets.append(user_dls_path)
+                if ctypes and hasattr(ctypes, 'windll'):
+                    bitmask = ctypes.windll.kernel32.GetLogicalDrives()
+                    for letter in string.ascii_uppercase:
+                        if bitmask & 1:
+                            drive_path = f"{letter}:\\"
+                            if ctypes.windll.kernel32.GetDriveTypeW(drive_path) == 3:
+                                rb_path = Path(drive_path) / "$Recycle.Bin"
+                                if rb_path.exists():
+                                    self.targets.append(rb_path)
+                        bitmask >>= 1
             except Exception:
-                # 权限不足或其他 IO 错误，回退到当前用户
                 pass
+        else:
+            # --- Linux 预留/默认扫描路径 ---
+            
+            # 1. 预留系统额外临时目录
+            var_tmp = Path('/var/tmp')
+            if var_tmp.exists():
+                self.targets.append(var_tmp)
 
-        # 如果通过遍历没找到任何微信路径（或者没权限遍历），尝试当前用户
-        if not any(self.is_wx_work(t) for t in self.targets):
-            try:
-                with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders") as key:
-                    personal_path, _ = winreg.QueryValueEx(key, "Personal")
-                    docs_path = Path(os.path.expandvars(personal_path))
-                    wx_work_path = docs_path / "WXWorkLocal"
-                    if wx_work_path.exists():
-                        self.targets.append(wx_work_path)
-            except Exception:
-                wx_default = Path(os.path.expanduser("~/Documents/WXWorkLocal"))
-                if wx_default.exists():
-                    self.targets.append(wx_default)
+            # 2. 预留用户级通用缓存目录（多数 Linux 桌面应用会将缓存写入此处）
+            user_cache = Path(os.path.expanduser('~/.cache'))
+            if user_cache.exists():
+                self.targets.append(user_cache)
 
-        # 6. 全盘回收站扫描 (V4.4 强力补丁)
-        try:
-            bitmask = ctypes.windll.kernel32.GetLogicalDrives()
-            for letter in string.ascii_uppercase:
-                if bitmask & 1:
-                    drive_path = f"{letter}:\\"
-                    # 仅扫描固定驱动器 (DRIVE_FIXED = 3)
-                    if ctypes.windll.kernel32.GetDriveTypeW(drive_path) == 3:
-                        rb_path = Path(drive_path) / "$Recycle.Bin"
-                        if rb_path.exists():
-                            self.targets.append(rb_path)
-                bitmask >>= 1
-        except Exception:
-            pass
+            # 3. 预留标准 XDG 规范回收站路径
+            user_trash = Path(os.path.expanduser('~/.local/share/Trash'))
+            if user_trash.exists():
+                self.targets.append(user_trash)
+                
+            # [提示] 后续您可以在此区域继续添加 Linux 专属扫描路径，例如：
+            # self.targets.append(Path('/path/to/your/linux/cache'))
         
         # 路径去重并标准化
-        
         clean_targets = []
         seen = set()
         for t in self.targets:
@@ -304,20 +320,45 @@ class CacheCleaner:
 
     def _empty_recycle_bin(self):
         """
-        调用 Windows Shell API 清空所有驱动器的回收站。
+        清空回收站。
+        Windows: 调用 Windows Shell API。
+        Linux: 递归清理 ~/.local/share/Trash 下的 files 和 info 目录。
         """
-        try:
-            # 定义 API 参数类型以提高稳定性
-            shell32 = ctypes.windll.shell32
-            # 1: SHERB_NOCONFIRMATION, 2: SHERB_NOPROGRESSUI, 4: SHERB_NOSOUND
-            flags = 1 | 2 | 4
-            
-            # SHEmptyRecycleBinW(HWND hwnd, LPCWSTR pszRootPath, DWORD dwFlags)
-            shell32.SHEmptyRecycleBinW.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_uint32]
-            shell32.SHEmptyRecycleBinW.restype = ctypes.c_int32
-            
-            res = shell32.SHEmptyRecycleBinW(None, None, flags)
-            return res
-        except Exception as e:
-            print(f"DEBUG: Recycle Bin API Error: {e}")
-            return -1
+        if sys.platform == 'win32':
+            try:
+                if not ctypes or not hasattr(ctypes, 'windll'):
+                    return -1
+                # 定义 API 参数类型以提高稳定性
+                shell32 = ctypes.windll.shell32
+                # 1: SHERB_NOCONFIRMATION, 2: SHERB_NOPROGRESSUI, 4: SHERB_NOSOUND
+                flags = 1 | 2 | 4
+                
+                # SHEmptyRecycleBinW(HWND hwnd, LPCWSTR pszRootPath, DWORD dwFlags)
+                shell32.SHEmptyRecycleBinW.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_uint32]
+                shell32.SHEmptyRecycleBinW.restype = ctypes.c_int32
+                
+                res = shell32.SHEmptyRecycleBinW(None, None, flags)
+                return res
+            except Exception as e:
+                print(f"DEBUG: Recycle Bin API Error: {e}")
+                return -1
+        else:
+            try:
+                import shutil
+                trash_files = Path(os.path.expanduser('~/.local/share/Trash/files'))
+                trash_info = Path(os.path.expanduser('~/.local/share/Trash/info'))
+                
+                for trash_dir in [trash_files, trash_info]:
+                    if trash_dir.exists():
+                        for entry in os.scandir(trash_dir):
+                            try:
+                                if entry.is_file() or entry.is_symlink():
+                                    os.remove(entry.path)
+                                elif entry.is_dir():
+                                    shutil.rmtree(entry.path)
+                            except Exception:
+                                pass
+                return 0
+            except Exception as e:
+                print(f"DEBUG: Linux Recycle Bin Clear Error: {e}")
+                return -1

@@ -68,7 +68,7 @@ class CacheCleanerApp(ctk.CTk):
             self.after(500, self.setup_shutdown_handler)
 
         # 核心增强：实现“运行一次即激活全员自启动”逻辑 (V4.3)
-        if is_admin() and not check_autostart():
+        if sys.platform == 'win32' and is_admin() and not check_autostart():
             if set_autostart(True):
                 self.autostart_var.set(True)
                 self.log("[自动激活] 检测到首次管理员运行，已自动为您注册全员自启动任务规划。")
@@ -251,8 +251,8 @@ class CacheCleanerApp(ctk.CTk):
     def toggle_autostart(self):
         enabled = self.autostart_var.get()
         
-        # 前置校验：只有管理员权限才能修改计划任务
-        if not is_admin():
+        # 前置校验：Windows 下只有管理员权限才能修改计划任务；Linux 下普通用户即可写入个人自启动目录
+        if sys.platform == 'win32' and not is_admin():
             messagebox.showwarning("权限受限", "修改自启动设置需要管理员权限。\n\n请右键点击程序，选择“以管理员身份运行”后再试。")
             self.autostart_var.set(not enabled) # 恢复开关状态
             return

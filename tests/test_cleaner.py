@@ -4,6 +4,7 @@ import tempfile
 from pathlib import Path
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
+sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from src.cleaner import CacheCleaner
 
@@ -21,7 +22,7 @@ def test_cleaner_mock():
         # Create dummy files
         (mock_temp / "file1.tmp").write_text("content")
         (mock_temp / "file2.tmp").write_text("content" * 100)
-        (mock_chrome / "cache_data").write_text("cache" * 50)
+        (mock_chrome / "cache_data.cache").write_text("cache" * 50)
         
         print(f"Created mock environment at {temp_dir}")
         
